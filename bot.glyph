@@ -40,6 +40,8 @@ modes 2d 3d
 rulesets classic inertial-2d gravity-flat gravity-hills zero-g
 memory shot 1
 memory lob 0
+memory dodge-until 0
+memory dodges 0
 
 # 1 under a quarter battery, else 0.
 : low-battery  battery-fraction 0.25 < ;
@@ -114,6 +116,28 @@ memory lob 0
   then
 ;
 
+# A simple dodge: vary it, or predict the shooter. A muzzle cue heard this
+# tick means a robot fired; for half a second swerve off the line of fire,
+# left on odd dodges and right on even ones: turn at full drive, or strafe
+# at half thrust under forces. The turret keeps tracking and firing.
+: dodge
+  tick dodge-until@ >= cue-muzzle and cue-age 0 = and if
+    tick 10 + dodge-until!
+    dodges@ 1 + dodges!
+  then
+  tick dodge-until@ < if
+    # The side is 1 for left and -1 for right; half as hard on low battery.
+    dodges@ 2 % 1 = 2 * 1 -
+    physics-mode if
+      neg strafe!
+      0.5 low-battery 0.25 * - thrust!
+    else
+      turn!
+      1 low-battery 0.5 * - drive!
+    then
+  then
+;
+
 # Sudden death: head back inside the safe zone. This replaces the steering
 # above but leaves the turret tracking and firing.
 : home
@@ -142,5 +166,6 @@ memory lob 0
 
 contact if track else search cue-present if listen then then
 physics-mode if fly then
+dodge
 storm-distance 60 < if flee then
 zone-active if zone-distance zone-radius 60 - > if home then then
