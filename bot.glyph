@@ -1,11 +1,12 @@
 # A starter robot for rules v2: sweep a medium scan to find a robot, narrow
 # it to hold the robot, pick shot power by range, and fire only when the
-# turret is on target and the battery can spare it. With nothing in the
+# bearing is precise, the turret is on target and the battery can spare it. With nothing in the
 # scan, follow a passive cue; step out of the storm. Glyph is postfix:
 # values first, then words.
 #
 # The trade-offs:
-#   scan     a narrow arc reaches further; a wide one finds robots nearby
+#   scan     a narrow arc reaches further and places a robot precisely; a
+#            wide one finds robots nearby
 #   power    heavy shots hit harder for less battery, but fly slowly
 #   battery  shots and driving share it, and it refills slowly
 #   turret   it turns at a limited rate; aim is where it points now
@@ -24,7 +25,8 @@
 #   storm-distance storm-bearing storm-heading cue-muzzle cue-bearing
 #   cue-elevation cue-range cue-age pickup-present pickup-bearing
 #   pickup-elevation pickup-range on-hill hill-held hill-bearing
-#   hill-elevation hill-range hill-time hill-to-win
+#   hill-elevation hill-range hill-time hill-to-win bearing-error
+#   range-error target-vx target-vy target-vz muzzle-heard
 # Older names: energy (battery) max-energy (battery-capacity)
 #   energy-fraction (battery-fraction) fire-base (shot-cost-base)
 #   fire-per-power (shot-cost-per-power)
@@ -42,6 +44,9 @@ memory shot 1
 memory lob 0
 memory dodge-until 0
 memory dodges 0
+memory lost 99
+memory last-bearing 0
+memory last-elevation 0
 
 # 1 under a quarter battery, else 0.
 : low-battery  battery-fraction 0.25 < ;
@@ -61,16 +66,29 @@ memory dodges 0
   dup lob! aim-pitch!
   bearing scan-heading!
   elevation scan-pitch!
-  # Narrow: holds the contact and reaches about 735.
-  20 scan-arc!
+  # Bearing is earned: one reading is off by about bearing-error degrees, a
+  # fixed share of the arc. Halve the beam each tick until it is about 60
+  # units across at the target, and at least 6 degrees: narrow enough for
+  # a precise bearing, wide enough to keep the target in it. In a crowd a
+  # narrow beam sees one robot, so every 40 ticks widen it to 40 for a
+  # tick: a nearer robot it finds becomes the target.
+  tick 40 % 0 = if
+    40
+  else
+    30 range atan2 2 * 6 max scan-arc 2 / max 40 min
+  then scan-arc!
+  # Where it was, in case the beam loses it.
+  0 lost! bearing last-bearing! elevation last-elevation!
   # The heaviest shot that still reaches the target in about one second:
   # shot speed is shot-speed-base + shot-speed-per-power * power.
   range shot-speed-base - shot-speed-per-power / power-min power-max clamp
   dup shot! power!
-  # Fire once the turret has slewed onto the target, keeping 10 in the
-  # battery after paying for the shot.
+  # Fire once the turret has slewed onto the target and one reading places
+  # it within 12 units across the line of sight (range * bearing-error in
+  # radians), keeping 10 in the battery after paying for the shot.
   cooldown 0 =
   aim-error abs 3 < and
+  range bearing-error * 57.3 / 12 < and
   lob@ aim-pitch - abs 3 < and
   battery shot-cost-base shot-cost-per-power shot@ * + 10 + >= and
   fire!
@@ -85,6 +103,17 @@ memory dodges 0
   # Nod the scanner up and down to find 3D targets above or below.
   tick 12 * sin 25 * scan-pitch!
   40 scan-arc!
+;
+
+# Lost it: for half a second look again where it was last seen, doubling
+# the beam each tick, before searching.
+: reacquire
+  0.5 low-battery 0.25 * - drive!
+  last-bearing@ heading angle 45 / clamp1 turn!
+  pitch neg 45 / clamp1 pitch-turn!
+  last-bearing@ scan-heading!
+  last-elevation@ scan-pitch!
+  scan-arc 2 * 40 min scan-arc!
 ;
 
 # A passive cue says roughly where a robot is, within cue-error degrees:
@@ -116,12 +145,12 @@ memory dodges 0
   then
 ;
 
-# A simple dodge: vary it, or predict the shooter. A muzzle cue heard this
-# tick means a robot fired; for half a second swerve off the line of fire,
+# A simple dodge: vary it, or predict the shooter. A shot heard this tick
+# (muzzle-heard, whatever the best cue is) means a robot fired; for half a second swerve off the line of fire,
 # left on odd dodges and right on even ones: turn at full drive, or strafe
 # at half thrust under forces. The turret keeps tracking and firing.
 : dodge
-  tick dodge-until@ >= cue-muzzle and cue-age 0 = and if
+  tick dodge-until@ >= muzzle-heard and if
     tick 10 + dodge-until!
     dodges@ 1 + dodges!
   then
@@ -164,7 +193,13 @@ memory dodges 0
   0.8 thrust!
 ;
 
-contact if track else search cue-present if listen then then
+contact if
+  track
+else
+  # Ticks since the target was last in the scan.
+  lost@ 1 + lost!
+  lost@ 10 <= if reacquire else search cue-present if listen then then
+then
 physics-mode if fly then
 dodge
 storm-distance 60 < if flee then
